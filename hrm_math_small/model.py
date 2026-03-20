@@ -212,7 +212,7 @@ class HyperbolicReasoningStudent(nn.Module):
         x = self.embed_drop(x)
 
         # Lift to Poincaré ball
-        x = expmap0(x * 0.1, c.item())   # scale down before lifting for stability
+        x = expmap0(x.float() * 0.05, c.item())  # fp32 + small scale for stability
 
         # Causal mask
         causal_mask = self.get_causal_mask(T, device)   # (1,1,T,T)
@@ -239,7 +239,8 @@ class HyperbolicReasoningStudent(nn.Module):
         x = self.final_norm(x)
         logits = self.lm_head(x)   # (B, T, vocab_size)
 
-        output = {"logits": logits, "curvature": c}
+        # x is now Euclidean fp32 (after logmap0 + final_norm) — expose for manifold losses
+        output = {"logits": logits, "curvature": c, "last_hidden": x}
 
         # Language modelling loss (next-token prediction)
         if labels is not None:
