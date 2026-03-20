@@ -1,5 +1,5 @@
 """
-hyperbolic.py 
+hyperbolic.py  (v2 — memory-efficient)
 Fix: HyperbolicAttention no longer expands Q/K to (B,h,T,T,dk).
 Uses chunked row-wise distance — O(T*dk) memory not O(T^2*dk).
 Also adds TangentSpaceAttention as a faster fallback.
@@ -79,6 +79,10 @@ class HypLinear(nn.Module):
 
 
 class HyperbolicMLP(nn.Module):
+    """
+    FFN that takes Euclidean input, processes via HypLinear (on ball),
+    and returns Euclidean output. Caller handles expmap0/logmap0 at boundaries.
+    """
     def __init__(self, input_dim, hidden_dim, c=1.0, dropout=0.1):
         super().__init__()
         self.c    = c
@@ -87,13 +91,14 @@ class HyperbolicMLP(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x):
-        h     = expmap0(x, self.c)
+        # x: Euclidean — lift to ball, transform, return Euclidean
+        h     = expmap0(x * 0.1, self.c)   # small scale before lifting
         h     = self.lin1(h)
         h_tan = logmap0(h, self.c)
         h_tan = F.relu(h_tan)
         h_tan = self.drop(h_tan)
-        h     = expmap0(h_tan, self.c)
-        return self.lin2(h)
+        h     = expmap0(h_tan * 0.1, self.c)
+        return logmap0(self.lin2(h), self.c)  # return Euclidean
 
 
 class HyperbolicAttention(nn.Module):

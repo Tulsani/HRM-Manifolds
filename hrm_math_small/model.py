@@ -54,20 +54,29 @@ from hyperbolic import (
 
 class HyperbolicLayerNorm(nn.Module):
     """
-    LayerNorm adapted for the Poincaré ball.
-    Strategy: lift to tangent space → normalize → project back.
-    This preserves the manifold structure while stabilizing training.
+    LayerNorm that operates in tangent space and returns a SCALED Euclidean
+    vector — NOT a point on the ball.
+
+    Why: standard LayerNorm produces vectors with norm ~ sqrt(d_model) ~ 22.
+    expmap0(v) with ||v||=22 gives tanh(22) ≈ 1.0 — every point lands on
+    the ball boundary, making mobius_add numerically undefined.
+
+    Instead we normalize in tangent space and scale the output down so
+    the caller can safely expmap0 it. The scale factor keeps norms in [0, 0.3]
+    which maps to ball norms in [0, 0.29] — well inside the unit ball.
     """
-    def __init__(self, d_model: int, c: float = 1.0, eps: float = 1e-6):
+    def __init__(self, d_model: int, c: float = 1.0, eps: float = 1e-6,
+                 scale: float = 0.1):
         super().__init__()
-        self.norm = nn.LayerNorm(d_model, eps=eps)
-        self.c    = c
+        self.norm  = nn.LayerNorm(d_model, eps=eps)
+        self.c     = c
+        self.scale = scale   # keep output norms small before expmap0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: points on ball → lift to tangent → normalize → project back
+        # x: points on ball → lift to tangent → normalize → scale down
+        # Returns Euclidean tangent vector, NOT a ball point
         x_tan = logmap0(x, self.c)
-        x_tan = self.norm(x_tan)
-        return expmap0(x_tan, self.c)
+        return self.norm(x_tan) * self.scale
 
 
 # ---------------------------------------------------------------------------
@@ -91,17 +100,20 @@ class HyperbolicTransformerLayer(nn.Module):
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         # x: (B, T, d_model) — points on ball
+        # norm1/norm2 return scaled Euclidean vectors (NOT ball points)
 
-        # Self-attention with Möbius residual
-        attn_out = self.attn(self.norm1(x), mask=mask)
-        # Möbius add for residual (stays on manifold)
-        x = mobius_add(x, attn_out, self.c)
+        # Self-attention: lift normed Euclidean vector to ball for attention
+        x_n1     = expmap0(self.norm1(x), self.c)   # Euclidean → ball
+        attn_out = self.attn(x_n1, mask=mask)       # returns Euclidean
+        # Scale down attn_out before adding as residual
+        attn_ball = expmap0(attn_out * 0.1, self.c)
+        x = mobius_add(x, attn_ball, self.c)
         x = clamp_to_ball(x, self.c)
 
-        # FFN with Möbius residual
-        ffn_out = self.ffn(logmap0(self.norm2(x), self.c))  # FFN expects Euclidean input
-        ffn_out = expmap0(ffn_out, self.c)
-        x = mobius_add(x, ffn_out, self.c)
+        # FFN: norm2 returns Euclidean, FFN takes Euclidean, output scaled
+        ffn_out  = self.ffn(self.norm2(x))          # both Euclidean
+        ffn_ball = expmap0(ffn_out * 0.1, self.c)
+        x = mobius_add(x, ffn_ball, self.c)
         x = clamp_to_ball(x, self.c)
 
         return x
