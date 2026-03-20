@@ -40,6 +40,7 @@ from hyperbolic import (
     HypLinear,
     HyperbolicMLP,
     HyperbolicAttention,
+    TangentSpaceAttention,
     expmap0,
     logmap0,
     mobius_add,
@@ -75,14 +76,13 @@ class HyperbolicLayerNorm(nn.Module):
 
 class HyperbolicTransformerLayer(nn.Module):
     """
-    One transformer layer where all operations live on the Poincaré ball.
-
-    Residual connections use Möbius addition instead of vector addition —
-    this keeps intermediate representations on the manifold throughout.
+    attn_type: 'tangent' (default, fast, no OOM) or 'geodesic' (exact, slow for long seqs)
     """
-    def __init__(self, d_model: int, n_heads: int, ffn_dim: int, c: float = 1.0, dropout: float = 0.1):
+    def __init__(self, d_model: int, n_heads: int, ffn_dim: int, c: float = 1.0,
+                 dropout: float = 0.1, attn_type: str = 'tangent'):
         super().__init__()
-        self.attn  = HyperbolicAttention(d_model, n_heads, c=c, dropout=dropout)
+        AttnClass = TangentSpaceAttention if attn_type == 'tangent' else HyperbolicAttention
+        self.attn  = AttnClass(d_model, n_heads, c=c, dropout=dropout)
         self.ffn   = HyperbolicMLP(d_model, ffn_dim, c=c, dropout=dropout)
         self.norm1 = HyperbolicLayerNorm(d_model, c=c)
         self.norm2 = HyperbolicLayerNorm(d_model, c=c)
@@ -162,7 +162,7 @@ class HyperbolicReasoningStudent(nn.Module):
         self.layers = nn.ModuleList([
             HyperbolicTransformerLayer(
                 d_model=d_model, n_heads=n_heads, ffn_dim=ffn_dim,
-                c=c_init, dropout=dropout,
+                c=c_init, dropout=dropout, attn_type='tangent',
             )
             for _ in range(n_layers)
         ])

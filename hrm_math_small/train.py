@@ -378,7 +378,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Mixed precision
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
     # Output dir
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -399,7 +399,7 @@ def train(args):
             labels         = batch["labels"].to(device)
             step_spans     = batch["step_spans"]
 
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 # Forward pass
                 out = student(
                     input_ids=input_ids,
