@@ -1,0 +1,47 @@
+seed: 42
+
+model:
+  n_layers: 12
+  d_model: 512
+  n_heads: 8
+  ffn_multiplier: 4
+  max_seq_len: 1024
+  vocab_size: 32000
+  dropout: 0.0
+  gradient_checkpointing: true
+
+training:
+  batch_size: 32
+  gradient_accumulation_steps: 4
+  learning_rate: 3e-4
+  weight_decay: 0.1
+  warmup_steps: 200
+  max_steps: 5000
+  alpha_lm: 0.5
+  beta_kd: 0.5
+  kd_temperature: 4.0
+  bf16: true
+  gradient_clip: 1.0
+
+teacher:
+  model_name: "HuggingFaceTB/SmolLM2-1.7B"
+  dtype: "float16"
+  device: "cuda"
+
+tokenizer:
+  model_name: "HuggingFaceTB/SmolLM2-1.7B"
+
+data:
+  instruction_dataset: "alpaca"
+  instruction_limit: 50000
+
+logging:
+  log_every: 50
+  save_every: 500
+
+eval_prompts:
+  - "Question: What is 8 plus 14?\nAnswer:"
+  - "Instruction: Explain why unit tests are useful in one sentence.\nResponse:"
+  - "Question: A class has 6 tables with 4 students each. How many students are there?\nAnswer:"
+  - "Instruction: Describe the goal of a language model backbone in one sentence.\nResponse:"
+  - "Question: If Sam has 9 apples and gives away 2, how many are left?\nAnswer:"
