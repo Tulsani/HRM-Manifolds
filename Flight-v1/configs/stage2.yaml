@@ -1,0 +1,20 @@
+backbone:
+  checkpoint: checkpoints/backbone_stage0.pt
+  config: configs/backbone_small.yaml
+  device: cuda
+  dtype: float16
+
+trace_library:
+  path: trace_library/
+
+geometry_probe:
+  min_examples_per_skill: 50
+  sample_size: 200
+  n_triples: 500
+  nn_k: 5
+
+output:
+  skill_labels: outputs/skill_labels.json
+  geometry_config: outputs/geometry_config.json
+  report: outputs/stage2_report.md
+  embeddings_dir: trace_library/embeddings/
