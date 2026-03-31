@@ -1,0 +1,16 @@
+teacher:
+  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  fallback_model: "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+  dtype: float16
+  device: cuda
+  max_new_tokens: 512
+  batch_size: 4
+
+data:
+  gsm8k_split: train
+  math_n_samples: 3000
+  math_stratify_by: subject
+
+output:
+  trace_dir: trace_library/
+  save_every: 500
