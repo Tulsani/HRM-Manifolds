@@ -1,0 +1,42 @@
+backbone:
+  checkpoint: checkpoints/backbone_stage0.pt
+  config: configs/backbone_small.yaml
+  device: cuda
+  dtype: float16
+
+router:
+  hidden_dim: 256
+  dropout: 0.1
+  abstain_threshold: 0.5
+
+data:
+  embeddings: trace_library/embeddings/problem_embeddings.npz
+  skill_labels: outputs/skill_labels.json
+  train_split: 0.85
+  val_split: 0.15
+
+training:
+  phase1_steps: 2000
+  phase2_steps: 200
+  batch_size: 128
+  lr: 3e-4
+  weight_decay: 0.01
+  warmup_steps: 50
+  gradient_clip: 1.0
+  log_every: 100
+
+losses:
+  lambda_cls: 1.0
+  lambda_sub: 0.3
+  lambda_cal: 0.5
+  lambda_ent: 0.1
+
+calibration:
+  n_bins: 10
+  temp_search_steps: 50
+  temp_range: [0.5, 5.0]
+
+output:
+  best_checkpoint: checkpoints/router_best.pt
+  final_checkpoint: checkpoints/router_stage4.pt
+  calibration_report: outputs/router_calibration.json
