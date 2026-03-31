@@ -12,7 +12,7 @@ from typing import Any, Iterable
 import numpy as np
 import torch
 import yaml
-from datasets import Dataset, load_dataset
+from datasets import Dataset, concatenate_datasets, load_dataset
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -26,6 +26,16 @@ STEP_PATTERN = re.compile(
 )
 BOXED_PATTERN = re.compile(r"\\boxed\{([^}]*)\}")
 NUMBER_PATTERN = re.compile(r"-?\d+(?:,\d{3})*(?:\.\d+)?")
+
+HENDRYCKS_MATH_SUBJECTS = [
+    "algebra",
+    "counting_and_probability",
+    "geometry",
+    "intermediate_algebra",
+    "number_theory",
+    "prealgebra",
+    "precalculus",
+]
 
 
 @dataclass
@@ -68,7 +78,11 @@ def split_rationale_into_steps(rationale: str, max_steps: int = 12) -> list[str]
         segment = segment.strip()
         if not segment:
             continue
-        split_segments = [part.strip(" -\t") for part in STEP_PATTERN.split(segment) if part.strip()]
+        split_segments = [
+            part.strip(" -\t")
+            for part in STEP_PATTERN.split(segment)
+            if part.strip()
+        ]
         if split_segments:
             pieces.extend(split_segments)
         else:
@@ -98,7 +112,7 @@ def extract_final_answer(generation: str) -> str:
     for marker in answer_markers:
         idx = lowered.rfind(marker)
         if idx != -1:
-            candidate = stripped[idx + len(marker) :].strip()
+            candidate = stripped[idx + len(marker):].strip()
             if candidate:
                 return candidate.splitlines()[-1].strip()
     return stripped.splitlines()[-1].strip()
@@ -149,27 +163,79 @@ def difficulty_from_math_level(level: str | int | None) -> str:
 def sparse_topk(logits: torch.Tensor, k: int = 1000) -> SparseLogits:
     k = min(k, logits.numel())
     values, indices = torch.topk(logits, k=k)
-    return SparseLogits(indices=indices.to(torch.int32).cpu().numpy(), values=values.to(torch.float16).cpu().numpy())
+    return SparseLogits(
+        indices=indices.to(torch.int32).cpu().numpy(),
+        values=values.to(torch.float16).cpu().numpy(),
+    )
 
 
 def confidence_from_logits(logits: torch.Tensor) -> float:
     return float(torch.softmax(logits.float(), dim=-1).max().item())
 
 
-def load_teacher_with_fallback(model_name: str, fallback_model: str, device: torch.device, dtype: torch.dtype):
+def load_hendrycks_math_all_subjects(split: str = "train") -> Dataset:
+    """
+    Load all hendrycks_math subjects and concatenate into one dataset.
+    Each example gets a 'subject' field injected so downstream code
+    (skill_tagger, difficulty mapping) can use it consistently.
+    The hendrycks_math dataset uses 'type' internally — we normalise
+    to 'subject' here so the rest of the pipeline never sees the
+    inconsistency.
+    """
+    subject_datasets = []
+    for subject in HENDRYCKS_MATH_SUBJECTS:
+        try:
+            ds = load_dataset(
+                "EleutherAI/hendrycks_math",
+                subject,
+                split=split,
+            )
+            # Inject normalised subject field
+            ds = ds.map(lambda example, s=subject: {**example, "subject": s})
+            subject_datasets.append(ds)
+            print(f"  Loaded {subject}: {len(ds)} examples")
+        except Exception as exc:
+            print(f"  WARNING: skipping {subject}: {exc}")
+
+    if not subject_datasets:
+        raise RuntimeError(
+            "Could not load any EleutherAI/hendrycks_math subjects. "
+            "Check your internet connection or HF_TOKEN."
+        )
+
+    combined = concatenate_datasets(subject_datasets)
+    print(f"  Total MATH examples: {len(combined)}")
+    return combined
+
+
+def load_teacher_with_fallback(
+    model_name: str,
+    fallback_model: str,
+    device: torch.device,
+    dtype: torch.dtype,
+):
     last_error: Exception | None = None
     for idx, candidate in enumerate([model_name, fallback_model]):
         try:
-            tokenizer = AutoTokenizer.from_pretrained(candidate, use_fast=True)
+            tokenizer = AutoTokenizer.from_pretrained(
+                candidate,
+                use_fast=True,
+                padding_side="left",   # required for decoder-only batched generation
+            )
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
-            model = AutoModelForCausalLM.from_pretrained(candidate, torch_dtype=dtype)
+            model = AutoModelForCausalLM.from_pretrained(
+                candidate,
+                dtype=dtype,           # use dtype= not torch_dtype= (deprecation fix)
+            )
             model.eval()
             model.to(device)
             for param in model.parameters():
                 param.requires_grad_(False)
             if idx == 1:
-                print(f"Warning: falling back to smaller teacher model: {candidate}")
+                print(
+                    f"Warning: falling back to smaller teacher model: {candidate}"
+                )
             return tokenizer, model, candidate
         except torch.cuda.OutOfMemoryError as exc:
             last_error = exc
@@ -177,19 +243,27 @@ def load_teacher_with_fallback(model_name: str, fallback_model: str, device: tor
                 break
             if device.type == "cuda":
                 torch.cuda.empty_cache()
-            print(f"Warning: CUDA OOM while loading {candidate}. Trying fallback model {fallback_model}.")
+            print(
+                f"Warning: CUDA OOM while loading {candidate}. "
+                f"Trying fallback model {fallback_model}."
+            )
         except OSError as exc:
             last_error = exc
             if candidate == fallback_model:
                 break
-            print(f"Warning: failed to load {candidate} ({exc}). Trying fallback model {fallback_model}.")
+            print(
+                f"Warning: failed to load {candidate} ({exc}). "
+                f"Trying fallback model {fallback_model}."
+            )
 
     error_message = (
         "Unable to load the teacher model from HuggingFace. "
         "Check your internet connection, local cache, and model access permissions."
     )
     if last_error is not None:
-        raise RuntimeError(f"{error_message} Last error: {last_error}") from last_error
+        raise RuntimeError(
+            f"{error_message} Last error: {last_error}"
+        ) from last_error
     raise RuntimeError(error_message)
 
 
@@ -208,16 +282,29 @@ def load_gsm8k_examples(split: str) -> list[dict[str, Any]]:
     ]
 
 
-def sample_math_examples(n_samples: int, seed: int = 42) -> list[dict[str, Any]]:
-    dataset: Dataset = load_dataset("lighteval/MATH", "all", split="train")
+def sample_math_examples(
+    n_samples: int,
+    seed: int = 42,
+) -> list[dict[str, Any]]:
+    """
+    Sample n_samples examples from hendrycks_math, stratified by subject.
+    Uses load_hendrycks_math_all_subjects() which handles the per-subject
+    loading and subject field normalisation.
+    """
+    dataset = load_hendrycks_math_all_subjects(split="train")
+
+    # Group by subject for stratified sampling
     by_subject: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     for idx, example in enumerate(dataset):
         subject = str(example.get("subject", "unknown"))
-        by_subject[subject].append((idx, example))
+        by_subject[subject].append((idx, dict(example)))
 
     rng = random.Random(seed)
     subjects = sorted(by_subject)
-    quotas = {subject: n_samples // max(len(subjects), 1) for subject in subjects}
+    quotas = {
+        subject: n_samples // max(len(subjects), 1)
+        for subject in subjects
+    }
     remainder = n_samples - sum(quotas.values())
     for subject in subjects[:remainder]:
         quotas[subject] += 1
@@ -236,6 +323,7 @@ def sample_math_examples(n_samples: int, seed: int = 42) -> list[dict[str, Any]]
         selected.extend(leftovers[: n_samples - len(selected)])
 
     selected.sort(key=lambda item: item[0])
+
     return [
         {
             "example_id": f"math_train_{position:04d}",
@@ -265,12 +353,21 @@ def count_processed_examples(jsonl_path: str | Path) -> int:
         return sum(1 for line in handle if line.strip())
 
 
-def get_resume_state(trace_dir: str | Path, source: str) -> tuple[int, dict[str, SparseLogits]]:
+def get_resume_state(
+    trace_dir: str | Path,
+    source: str,
+) -> tuple[int, dict[str, SparseLogits]]:
     paths = get_output_paths(trace_dir, source)
-    return count_processed_examples(paths.jsonl_path), load_sparse_logits(paths.logits_path)
+    return (
+        count_processed_examples(paths.jsonl_path),
+        load_sparse_logits(paths.logits_path),
+    )
 
 
-def write_trace_batch(jsonl_path: Path, traces: Iterable[TracePackage]) -> None:
+def write_trace_batch(
+    jsonl_path: Path,
+    traces: Iterable[TracePackage],
+) -> None:
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     with jsonl_path.open("a", encoding="utf-8") as handle:
         for trace in traces:
@@ -278,11 +375,19 @@ def write_trace_batch(jsonl_path: Path, traces: Iterable[TracePackage]) -> None:
             handle.write("\n")
 
 
-def save_skill_index(trace_dir: str | Path, traces: list[TracePackage]) -> None:
+def save_skill_index(
+    trace_dir: str | Path,
+    traces: list[TracePackage],
+) -> None:
     path = Path(trace_dir) / "skill_index.json"
     example_to_skill = {trace.example_id: trace.skill for trace in traces}
     with path.open("w", encoding="utf-8") as handle:
-        json.dump(build_skill_index(example_to_skill), handle, indent=2, sort_keys=True)
+        json.dump(
+            build_skill_index(example_to_skill),
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
 
 
 def _collate_examples(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -297,7 +402,10 @@ def generate_trace_batch(
     max_new_tokens: int,
     teacher_model_name: str,
 ) -> list[TracePackage]:
-    prompts = [PROMPT_TEMPLATE.format(problem=example["problem"]) for example in examples]
+    prompts = [
+        PROMPT_TEMPLATE.format(problem=example["problem"])
+        for example in examples
+    ]
     encoded = tokenizer(
         prompts,
         return_tensors="pt",
@@ -311,7 +419,6 @@ def generate_trace_batch(
         **encoded,
         max_new_tokens=max_new_tokens,
         do_sample=False,
-        temperature=1.0,
         output_scores=True,
         return_dict_in_generate=True,
         pad_token_id=tokenizer.pad_token_id,
@@ -325,8 +432,12 @@ def generate_trace_batch(
     timestamp = datetime.now(timezone.utc).isoformat()
 
     for batch_idx, example in enumerate(examples):
-        continuation_ids = generated_sequences[batch_idx, prompt_lengths[batch_idx] :]
-        continuation_text = tokenizer.decode(continuation_ids, skip_special_tokens=True).strip()
+        continuation_ids = generated_sequences[
+            batch_idx, prompt_lengths[batch_idx]:
+        ]
+        continuation_text = tokenizer.decode(
+            continuation_ids, skip_special_tokens=True
+        ).strip()
         final_answer = extract_final_answer(continuation_text)
         step_texts = split_rationale_into_steps(continuation_text)
         skill, subskills = tag_trace(
@@ -340,20 +451,31 @@ def generate_trace_batch(
         valid_generated_ids = [
             token_id
             for token_id in continuation_ids.tolist()
-            if token_id not in {tokenizer.pad_token_id, tokenizer.eos_token_id}
+            if token_id not in {
+                tokenizer.pad_token_id,
+                tokenizer.eos_token_id,
+            }
         ]
         if valid_generated_ids:
             score_index = len(valid_generated_ids) - 1
             final_step_logits = score_steps[score_index][batch_idx].detach()
         else:
-            final_step_logits = score_steps[0][batch_idx].detach() if score_steps else torch.zeros(tokenizer.vocab_size, device=device)
+            final_step_logits = (
+                score_steps[0][batch_idx].detach()
+                if score_steps
+                else torch.zeros(tokenizer.vocab_size, device=device)
+            )
 
         soft_logits = sparse_topk(final_step_logits, k=1000)
         confidence = confidence_from_logits(final_step_logits)
         is_correct = (
-            verify_gsm8k_answer(example["reference_answer"], continuation_text)
+            verify_gsm8k_answer(
+                example["reference_answer"], continuation_text
+            )
             if example["source"] == "gsm8k"
-            else verify_math_answer(example["reference_answer"], continuation_text)
+            else verify_math_answer(
+                example["reference_answer"], continuation_text
+            )
         )
 
         traces.append(
@@ -402,7 +524,9 @@ def run_trace_generation(config: dict[str, Any]) -> dict[str, Any]:
 
     datasets_by_source = {
         "gsm8k": load_gsm8k_examples(split=data_cfg["gsm8k_split"]),
-        "math": sample_math_examples(n_samples=int(data_cfg["math_n_samples"])),
+        "math": sample_math_examples(
+            n_samples=int(data_cfg["math_n_samples"])
+        ),
     }
 
     summary: dict[str, Any] = {"per_source": {}, "skills": Counter()}
@@ -415,7 +539,12 @@ def run_trace_generation(config: dict[str, Any]) -> dict[str, Any]:
         pending_traces: list[TracePackage] = []
         completed_count = processed_count
 
-        data_loader = DataLoader(remaining, batch_size=batch_size, shuffle=False, collate_fn=_collate_examples)
+        data_loader = DataLoader(
+            remaining,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=_collate_examples,
+        )
         for batch_examples in data_loader:
             try:
                 batch_traces = generate_trace_batch(
@@ -429,8 +558,9 @@ def run_trace_generation(config: dict[str, Any]) -> dict[str, Any]:
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
                 raise RuntimeError(
-                    f"CUDA ran out of memory while generating {source} traces. "
-                    "Reduce teacher.batch_size or switch to the fallback model."
+                    f"CUDA ran out of memory while generating {source} "
+                    "traces. Reduce teacher.batch_size or switch to the "
+                    "fallback model."
                 ) from exc
 
             pending_traces.extend(batch_traces)
@@ -441,7 +571,10 @@ def run_trace_generation(config: dict[str, Any]) -> dict[str, Any]:
             completed_count += len(batch_traces)
             total_processed = completed_count
             if total_processed % 100 == 0:
-                print(f"[{source}] processed {total_processed} / {len(examples)} examples")
+                print(
+                    f"[{source}] processed {total_processed} "
+                    f"/ {len(examples)} examples"
+                )
 
             if total_processed % save_every == 0:
                 write_trace_batch(paths.jsonl_path, pending_traces)
@@ -484,10 +617,17 @@ def run_trace_generation(config: dict[str, Any]) -> dict[str, Any]:
                 if not line.strip():
                     continue
                 payload = json.loads(line)
-                combined_traces.append(TracePackage.from_jsonl(line, sparse_logits=logits_map.get(payload["example_id"])))
+                combined_traces.append(
+                    TracePackage.from_jsonl(
+                        line,
+                        sparse_logits=logits_map.get(payload["example_id"]),
+                    )
+                )
 
     save_skill_index(trace_dir, combined_traces)
-    summary["skills"] = dict(count_skills([trace.skill for trace in combined_traces]))
+    summary["skills"] = dict(
+        count_skills([trace.skill for trace in combined_traces])
+    )
     summary["trace_dir"] = str(trace_dir)
     summary["teacher_model"] = teacher_model_name
     return summary
