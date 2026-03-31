@@ -1,0 +1,49 @@
+backbone:
+  checkpoint: checkpoints/backbone_stage0.pt
+  config: configs/backbone_small.yaml
+  dtype: bfloat16
+
+router:
+  checkpoint: checkpoints/router_stage4.pt
+  freeze_lr: 1e-5
+
+experts:
+  checkpoint_dir: checkpoints/
+  checkpoint_pattern: expert_{skill}_stage3.pt
+  geometry_config: outputs/geometry_config.json
+
+training:
+  phase1_steps: 500
+  phase2_steps: 4000
+  phase3_fraction: 0.1
+  batch_size: 16
+  gradient_accumulation: 4
+  gradient_clip: 1.0
+
+  backbone_lr: 5e-5
+  router_lr: 1e-5
+  expert_lr: 3e-4
+  head_lr: 3e-4
+  weight_decay: 0.01
+  warmup_steps: 100
+  kd_temperature: 4.0
+
+  lambda_1: 1.0
+  lambda_2: 0.7
+  lambda_3: 0.5
+  lambda_4: 0.3
+  geom_ramp_steps: 200
+
+  log_every: 100
+  val_every: 500
+  save_every: 1000
+
+evaluation:
+  gsm8k_val_n: 500
+  math500_n: 500
+  device: cuda
+
+output:
+  best_checkpoint: checkpoints/system_best.pt
+  final_checkpoint: checkpoints/full_system_stage5.pt
+  eval_results: outputs/stage5_eval.json
