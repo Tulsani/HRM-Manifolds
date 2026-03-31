@@ -1,0 +1,27 @@
+backbone:
+  checkpoint: checkpoints/backbone_stage0.pt
+  config: configs/backbone_small.yaml
+  device: cuda
+  dtype: float16
+
+manifold:
+  geometry_config: outputs/geometry_config.json
+  default_manifold_dim: 32
+
+pretraining:
+  optimizer: adam
+  lr: 1e-3
+  batch_size: 64
+  max_steps: 1000
+  gradient_clip: 1.0
+  log_every: 50
+
+  lambda_proto: 1.0
+  lambda_struct: 0.5
+  lambda_order: 0.5
+  margin_proto: 2.0
+  margin_order: 0.5
+
+output:
+  checkpoint_dir: checkpoints/
+  checkpoint_prefix: expert_{skill}_stage3.pt
