@@ -437,8 +437,8 @@ def generate_trace_batch(
                 tokenizer.eos_token_id,
             }
         ]
-        if valid_generated_ids:
-            score_index = len(valid_generated_ids) - 1
+        if valid_generated_ids and score_steps:
+            score_index = min(len(valid_generated_ids) - 1, len(score_steps) - 1)
             final_step_logits = score_steps[score_index][batch_idx].detach()
         else:
             final_step_logits = (
