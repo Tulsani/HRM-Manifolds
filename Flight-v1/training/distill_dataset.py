@@ -91,13 +91,22 @@ class DistillDataset(Dataset):
 
     def _build_item(
         self, trace: TracePackage, label_info: dict[str, Any]
-    ) -> dict[str, Any]:
+        ) -> dict[str, Any]:
+        max_len = self.tokenizer.max_length  # 1024 from backbone config
+
         input_ids = self.tokenizer.tokenizer(
-            trace.problem, add_special_tokens=True
+            trace.problem,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=max_len,
         )["input_ids"]
+
         target_text = trace.rationale if trace.rationale else trace.final_answer
         target_ids = self.tokenizer.tokenizer(
-            target_text, add_special_tokens=True
+            target_text,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=max_len,
         )["input_ids"]
 
         # Always allocate at student vocab_size.
