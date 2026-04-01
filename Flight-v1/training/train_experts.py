@@ -56,7 +56,7 @@ def train_all_experts(config: dict[str, Any]) -> list[dict[str, Any]]:
 
         local_skill_cfg = {
             **skill_cfg,
-            "n_prototypes": max(len(dataset.prototype_to_id), 1),
+            "n_prototypes": int(config["manifold"].get("n_prototypes", 32)),
         }
         if local_skill_cfg.get("geometry") == "product" and "manifold_dim" not in local_skill_cfg:
             local_skill_cfg["manifold_dim"] = int(config["manifold"]["default_manifold_dim"])
