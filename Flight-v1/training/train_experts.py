@@ -88,9 +88,16 @@ def train_all_experts(config: dict[str, Any]) -> list[dict[str, Any]]:
                 margin_proto=float(pretrain_cfg["margin_proto"]),
                 margin_order=float(pretrain_cfg["margin_order"]),
             )
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(expert.parameters(), max_norm=float(pretrain_cfg["gradient_clip"]))
-            optimizer.step()
+            if loss.requires_grad and float(loss.item()) != 0.0:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    expert.parameters(),
+                    max_norm=float(pretrain_cfg["gradient_clip"])
+                )
+                optimizer.step()
+            else:
+                # Loss is zero or detached — skip backward, still update metrics
+                optimizer.zero_grad(set_to_none=True)
             final_metrics = metrics
 
             if step % int(pretrain_cfg["log_every"]) == 0:

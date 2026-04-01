@@ -15,7 +15,7 @@ def subskill_prototype_loss(
 ) -> Tensor:
     loss = expert.prototype_loss(h, prototype_ids, margin=margin)
     if not torch.isfinite(loss):
-        return h.new_tensor(0.0)
+        return h.new_tensor(0.0).requires_grad_(True)
     return loss.clamp_min(0.0)
 
 
@@ -25,7 +25,7 @@ def pairwise_structure_loss(
     teacher_embeddings: Tensor,
 ) -> Tensor:
     if z.size(0) < 2:
-        return z.new_tensor(0.0)
+        return z.new_tensor(0.0).requires_grad_(True)
 
     teacher_embeddings = teacher_embeddings.float()
     t_norm = F.normalize(teacher_embeddings, dim=-1)
@@ -37,12 +37,12 @@ def pairwise_structure_loss(
     # guard: if all distances are zero (degenerate), return 0
     max_dist = student_dist.max()
     if max_dist < 1e-8:
-        return z.new_tensor(0.0)
+        return z.new_tensor(0.0).requires_grad_(True)
     student_sim = (1.0 - (student_dist / max_dist)).clamp(0.0, 1.0)
 
     loss = F.mse_loss(student_sim, teacher_sim.detach())
     if not torch.isfinite(loss):
-        return z.new_tensor(0.0)
+        return z.new_tensor(0.0).requires_grad_(True)
     return loss
 
 
@@ -89,7 +89,7 @@ def step_ordering_loss(
             losses.append(step_loss)
 
     if not losses:
-        return next(expert.parameters()).new_tensor(0.0)
+        return next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
     return torch.stack(losses).mean().clamp_min(0.0)
 
 
@@ -107,7 +107,7 @@ def compute_pretraining_loss(
 ) -> tuple[Tensor, dict[str, float]]:
     # guard: skip batch if input contains NaN
     if not torch.isfinite(h).all():
-        zero = next(expert.parameters()).new_tensor(0.0)
+        zero = next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
         return zero, {
             "loss": 0.0,
             "loss_proto": 0.0,
@@ -119,7 +119,7 @@ def compute_pretraining_loss(
 
     # guard: if encode produced NaN fall back
     if not torch.isfinite(z).all():
-        zero = next(expert.parameters()).new_tensor(0.0)
+        zero = next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
         return zero, {
             "loss": 0.0,
             "loss_proto": 0.0,
@@ -140,7 +140,7 @@ def compute_pretraining_loss(
     # final guard: if total is still NaN, return zero to avoid
     # corrupting the optimizer state
     if not torch.isfinite(total):
-        total = next(expert.parameters()).new_tensor(0.0)
+        total = next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
 
     metrics = {
         "loss":         float(total.detach().item()),
