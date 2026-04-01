@@ -14,8 +14,7 @@ def subskill_prototype_loss(
     margin: float = 2.0,
 ) -> Tensor:
     loss = expert.prototype_loss(h, prototype_ids, margin=margin)
-    if not torch.isfinite(loss):
-        return h.new_tensor(0.0).requires_grad_(True)
+    loss = torch.nan_to_num(loss, nan=0.0, posinf=1.0, neginf=0.0)
     return loss.clamp_min(0.0)
 
 
@@ -27,13 +26,16 @@ def pairwise_structure_loss(
     if z.size(0) < 2:
         return z.new_tensor(0.0).requires_grad_(True)
 
-    teacher_embeddings = teacher_embeddings.float()
+    teacher_embeddings = torch.nan_to_num(
+        teacher_embeddings.float(), nan=0.0, posinf=1.0, neginf=-1.0
+    )
     t_norm = F.normalize(teacher_embeddings, dim=-1)
     teacher_sim = (t_norm @ t_norm.T)
     # map from [-1,1] to [0,1]
     teacher_sim = ((teacher_sim + 1.0) / 2.0).clamp(0.0, 1.0)
 
     student_dist = expert.distance(z, z).float()
+    student_dist = torch.nan_to_num(student_dist, nan=0.0, posinf=1.0, neginf=0.0)
     # guard: if all distances are zero (degenerate), return 0
     max_dist = student_dist.max()
     if max_dist < 1e-8:
@@ -41,9 +43,7 @@ def pairwise_structure_loss(
     student_sim = (1.0 - (student_dist / max_dist)).clamp(0.0, 1.0)
 
     loss = F.mse_loss(student_sim, teacher_sim.detach())
-    if not torch.isfinite(loss):
-        return z.new_tensor(0.0).requires_grad_(True)
-    return loss
+    return torch.nan_to_num(loss, nan=0.0, posinf=1.0, neginf=0.0).clamp_min(0.0)
 
 
 def step_ordering_loss(
@@ -53,23 +53,16 @@ def step_ordering_loss(
 ) -> Tensor:
     losses: list[Tensor] = []
     for step_matrix in step_embeddings:
+        step_matrix = torch.nan_to_num(step_matrix, nan=0.0, posinf=1.0, neginf=-1.0)
         # guard: need at least 3 steps and non-empty tensor
         if step_matrix.ndim != 2 or step_matrix.size(0) < 3:
             continue
-        # guard: skip if step_matrix contains NaN/Inf
-        if not torch.isfinite(step_matrix).all():
-            continue
 
         z_steps = expert.encode(step_matrix)
-
-        # guard: skip if encode produced NaN
-        if not torch.isfinite(z_steps).all():
-            continue
+        z_steps = torch.nan_to_num(z_steps, nan=0.0, posinf=1.0, neginf=-1.0)
 
         distances = expert.distance(z_steps, z_steps)
-
-        if not torch.isfinite(distances).all():
-            continue
+        distances = torch.nan_to_num(distances, nan=0.0, posinf=1.0, neginf=0.0)
 
         consecutive = distances.diagonal(offset=1)
         if consecutive.numel() == 0:
@@ -85,8 +78,7 @@ def step_ordering_loss(
         d_random = random_distances.mean()
         step_loss = torch.relu(d_consec - d_random + margin)
 
-        if torch.isfinite(step_loss):
-            losses.append(step_loss)
+        losses.append(torch.nan_to_num(step_loss, nan=0.0, posinf=1.0, neginf=0.0))
 
     if not losses:
         return next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
@@ -105,27 +97,16 @@ def compute_pretraining_loss(
     margin_proto: float = 2.0,
     margin_order: float = 0.5,
 ) -> tuple[Tensor, dict[str, float]]:
-    # guard: skip batch if input contains NaN
-    if not torch.isfinite(h).all():
-        zero = next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
-        return zero, {
-            "loss": 0.0,
-            "loss_proto": 0.0,
-            "loss_struct": 0.0,
-            "loss_order": 0.0,
-        }
-
+    h = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0)
+    teacher_embeddings = torch.nan_to_num(
+        teacher_embeddings, nan=0.0, posinf=1.0, neginf=-1.0
+    )
+    step_embeddings = [
+        torch.nan_to_num(step_matrix, nan=0.0, posinf=1.0, neginf=-1.0)
+        for step_matrix in step_embeddings
+    ]
     z = expert.encode(h)
-
-    # guard: if encode produced NaN fall back
-    if not torch.isfinite(z).all():
-        zero = next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
-        return zero, {
-            "loss": 0.0,
-            "loss_proto": 0.0,
-            "loss_struct": 0.0,
-            "loss_order": 0.0,
-        }
+    z = torch.nan_to_num(z, nan=0.0, posinf=1.0, neginf=-1.0)
 
     loss_proto  = subskill_prototype_loss(expert, h, prototype_ids, margin=margin_proto)
     loss_struct = pairwise_structure_loss(expert, z, teacher_embeddings)
@@ -137,10 +118,7 @@ def compute_pretraining_loss(
       + lambda_order  * loss_order
     )
 
-    # final guard: if total is still NaN, return zero to avoid
-    # corrupting the optimizer state
-    if not torch.isfinite(total):
-        total = next(expert.parameters()).new_tensor(0.0).requires_grad_(True)
+    total = torch.nan_to_num(total, nan=0.0, posinf=1.0, neginf=0.0)
 
     metrics = {
         "loss":         float(total.detach().item()),

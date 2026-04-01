@@ -69,6 +69,18 @@ def train_all_experts(config: dict[str, Any]) -> list[dict[str, Any]]:
         final_metrics = {"loss": 0.0, "loss_proto": 0.0, "loss_struct": 0.0, "loss_order": 0.0}
         max_steps = int(pretrain_cfg["max_steps"])
 
+        diagnostic_batch = next(iterator)
+        diagnostic_h = diagnostic_batch["teacher_embeddings"].to(device=device, dtype=torch.float32)
+        with torch.no_grad():
+            diagnostic_z = expert.encode(diagnostic_h)
+            encode_finite = bool(torch.isfinite(diagnostic_z).all().item())
+            has_nan = bool(torch.isnan(diagnostic_z).any().item())
+            print(
+                f"[{skill}] startup encode diagnostic: "
+                f"finite={encode_finite} nan={has_nan} "
+                f"input_finite={bool(torch.isfinite(diagnostic_h).all().item())}"
+            )
+
         for step in range(1, max_steps + 1):
             batch = next(iterator)
             teacher_embeddings = batch["teacher_embeddings"].to(device=device, dtype=torch.float32)

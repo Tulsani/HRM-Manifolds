@@ -19,17 +19,14 @@ class MobiusLinear(nn.Module):
         self.in_features = int(in_features)
         self.out_features = int(out_features)
         self.curvature = float(curvature)
-        self.weight = nn.Parameter(torch.empty(self.out_features, self.in_features))
-        self.bias = nn.Parameter(torch.zeros(self.out_features))
-        nn.init.xavier_uniform_(self.weight, gain=0.1)  # small init
+        self.linear = nn.Linear(self.in_features, self.out_features)
+        nn.init.xavier_uniform_(self.linear.weight, gain=0.05)
+        nn.init.zeros_(self.linear.bias)
 
     def forward(self, x: Tensor) -> Tensor:
-        tangent = logmap0(x, self.curvature)
-        # clamp tangent to prevent exploding linear outputs
-        tangent = tangent.clamp(-10.0, 10.0)
-        projected = torch.nn.functional.linear(tangent, self.weight, self.bias)
-        # clamp before expmap0 to stay well inside ball
-        projected = projected.clamp(-5.0, 5.0)
+        x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+        projected = self.linear(x).clamp(-5.0, 5.0)
+        projected = torch.nan_to_num(projected, nan=0.0, posinf=5.0, neginf=-5.0)
         return expmap0(projected, self.curvature)
 
 
@@ -62,15 +59,29 @@ class HyperbolicExpert(ManifoldExpert):
         )
 
     def encode(self, h: Tensor) -> Tensor:
-        h_proj = self.input_proj(h)
-        # normalise before lifting — prevents large-norm inputs
-        # from pushing points to the ball boundary
-        h_proj = self.input_norm(h_proj)
-        # scale down further so expmap0 maps to interior of ball
-        h_proj = h_proj * 0.1
-        z0 = expmap0(h_proj, self.curvature)
+        h_safe = torch.nan_to_num(h, nan=0.0, posinf=1.0, neginf=-1.0)
+        h_proj = self.input_proj(h_safe)
+        h_proj = torch.nan_to_num(h_proj, nan=0.0, posinf=10.0, neginf=-10.0)
+        h_proj = h_proj.clamp(-10.0, 10.0)
+
+        h_norm = self.input_norm(h_proj)
+        h_norm = torch.nan_to_num(h_norm, nan=0.0, posinf=10.0, neginf=-10.0)
+        h_norm = h_norm.clamp(-10.0, 10.0)
+
+        h_scaled = h_norm * 0.1
+        h_scaled = torch.nan_to_num(h_scaled, nan=0.0, posinf=1.0, neginf=-1.0)
+        h_scaled = h_scaled.clamp(-1.0, 1.0)
+
+        z0 = expmap0(h_scaled, self.curvature)
+        z0 = torch.nan_to_num(z0, nan=0.0, posinf=0.5, neginf=-0.5)
+        z0 = project_to_ball(z0, self.curvature)
+
         z1 = self.mobius_linear_1(z0)
+        z1 = torch.nan_to_num(z1, nan=0.0, posinf=0.5, neginf=-0.5)
+        z1 = project_to_ball(z1, self.curvature)
+
         z2 = self.mobius_linear_2(z1)
+        z2 = torch.nan_to_num(z2, nan=0.0, posinf=0.5, neginf=-0.5)
         return project_to_ball(z2, self.curvature)
 
     def distance(self, z1: Tensor, z2: Tensor) -> Tensor:
