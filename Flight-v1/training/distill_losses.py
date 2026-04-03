@@ -46,9 +46,6 @@ class DistillLoss(nn.Module):
         self.lambda_4 = float(lambda_4)
 
     def _task_loss(self, student_logits: Tensor, target_ids: Tensor) -> Tensor:
-        # student_logits: [B, T_input, vocab]  — input sequence length
-        # target_ids:     [B, T_target]        — rationale length (different)
-        # Align by taking the shorter sequence
         T = min(student_logits.size(1), target_ids.size(1))
         return F.cross_entropy(
             student_logits[:, :T, :].reshape(-1, student_logits.size(-1)),
@@ -64,7 +61,6 @@ class DistillLoss(nn.Module):
         sample_weights: Tensor,
     ) -> Tensor:
         T_student = student_logits.size(1)
-        # Find last non-pad position within student sequence length
         last_indices = (
             target_ids[:, :T_student].ne(self.pad_token_id).sum(dim=1).clamp_min(1) - 1
         ).clamp(max=T_student - 1)
@@ -72,11 +68,8 @@ class DistillLoss(nn.Module):
             target_ids.size(0), device=target_ids.device
         )
         student_final = student_logits[batch_indices, last_indices]
-
-        # Align vocab dims — teacher vocab may be larger than student vocab
         vocab_student = student_final.size(-1)
         teacher_trimmed = teacher_logits[:, :vocab_student]
-
         teacher_dist = torch.softmax(
             teacher_trimmed / self.kd_temperature, dim=-1
         )
@@ -167,6 +160,8 @@ class DistillLoss(nn.Module):
             l_proto = expert.prototype_memory.prototype_loss(
                 z_s, proto_ids, getattr(expert, "curvature", 1.0)
             )
+            if not torch.isfinite(l_proto):
+                l_proto = z_s.new_tensor(0.0)
         elif hasattr(expert, "h_branch") and hasattr(
             expert.h_branch, "prototype_memory"
         ):
@@ -183,14 +178,25 @@ class DistillLoss(nn.Module):
                 proto_ids,
                 getattr(expert.h_branch, "curvature", 1.0),
             )
+            if not torch.isfinite(l_proto):
+                l_proto = z_s.new_tensor(0.0)
         else:
             l_proto = z_s.new_tensor(0.0)
 
         l_diff = self._difficulty_loss(expert, z_s, difficulty)
+        if not torch.isfinite(l_diff):
+            l_diff = z_s.new_tensor(0.0)
+
         l_sep = self._incorrect_separation_loss(
             expert, z_s, subskill_labels, incorrect_mask
         )
+        if not torch.isfinite(l_sep):
+            l_sep = z_s.new_tensor(0.0)
+
         l_geom = l_proto + 0.5 * l_diff + 0.5 * l_sep
+        if not torch.isfinite(l_geom):
+            l_geom = z_s.new_tensor(0.0)
+
         return l_geom, l_proto, l_diff, l_sep
 
     def forward(
@@ -223,6 +229,15 @@ class DistillLoss(nn.Module):
         l_geom, l_proto, l_diff, l_sep = self._geom_loss(
             expert, z_s, subskill_labels, difficulty, incorrect_mask
         )
+
+        # Guard all loss terms before combining into total
+        l_task  = torch.nan_to_num(l_task,  nan=0.0)
+        l_kd    = torch.nan_to_num(l_kd,    nan=0.0)
+        l_trace = torch.nan_to_num(l_trace, nan=0.0)
+        l_geom  = torch.nan_to_num(l_geom,  nan=0.0)
+        l_proto = torch.nan_to_num(l_proto, nan=0.0)
+        l_diff  = torch.nan_to_num(l_diff,  nan=0.0)
+        l_sep   = torch.nan_to_num(l_sep,   nan=0.0)
 
         route_scale = router_weights.gather(
             1, skill_label.unsqueeze(1)
