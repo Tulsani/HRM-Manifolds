@@ -16,7 +16,7 @@ training:
   phase1_steps: 500
   phase2_steps: 4000
   phase3_fraction: 0.1
-  batch_size: 16
+  batch_size: 4
   gradient_accumulation: 4
   gradient_clip: 1.0
 
