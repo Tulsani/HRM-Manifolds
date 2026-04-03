@@ -152,10 +152,13 @@ def _training_step(
     sample_weights = batch["sample_weights"].to(device)
 
     hidden_states, _ = system.backbone(input_ids, attention_mask=attention_mask)
+    hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=1.0, neginf=-1.0)
     router_out = system.router(hidden_states)
     pooled = hidden_states.mean(dim=1)
     active_idx = skill_label
-    student_logits = hidden_states.new_zeros((input_ids.size(0), input_ids.size(1), system.backbone.config.vocab_size))
+    student_logits = hidden_states.new_zeros(
+        (input_ids.size(0), input_ids.size(1), system.backbone.config.vocab_size)
+    )
     total_loss = hidden_states.new_tensor(0.0)
     loss_summaries = []
 
@@ -165,9 +168,15 @@ def _training_step(
             continue
         expert = system.experts[skill]
         token_hidden = hidden_states[mask].reshape(-1, hidden_states.size(-1))
-        token_z = expert.to_euclidean(expert.encode(token_hidden)).reshape(mask.sum(), hidden_states.size(1), -1)
+        token_z = expert.to_euclidean(expert.encode(token_hidden))
+        token_z = torch.nan_to_num(token_z, nan=0.0, posinf=1.0, neginf=-1.0)
+        token_z = token_z.reshape(mask.sum(), hidden_states.size(1), -1)
         student_logits[mask] = system.heads[skill](token_z)
         pooled_z = expert.to_euclidean(expert.encode(pooled[mask]))
+        pooled_z = torch.nan_to_num(pooled_z, nan=0.0, posinf=1.0, neginf=-1.0)
+        student_logits = torch.nan_to_num(
+            student_logits, nan=0.0, posinf=1.0, neginf=-1.0
+        )
         loss_output = loss_fn(
             student_logits=student_logits[mask],
             target_ids=target_ids[mask],
