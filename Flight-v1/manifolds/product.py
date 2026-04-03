@@ -36,13 +36,23 @@ class ProductManifoldExpert(ManifoldExpert):
             curvature=curvature,
             n_prototypes=n_prototypes,
         )
-        self.e_branch = EuclideanExpert(skill=skill, input_dim=input_dim, e_dim=e_dim)
+        self.e_branch = EuclideanExpert(
+            skill=skill, input_dim=input_dim, e_dim=e_dim
+        )
         self.fusion = nn.Linear(self.h_dim + self.e_dim, self.manifold_dim)
 
     def encode(self, h: Tensor) -> Tensor:
+        # The hyperbolic branch (h_branch) produces NaN gradients via logmap0
+        # when x_norm is near zero. Detaching z_h_flat from the computation
+        # graph prevents NaN from flowing into z_e via torch.cat backward.
+        # Gradients flow through e_branch and fusion only.
         z_h = self.h_branch.encode(h)
-        z_e = self.e_branch.encode(h)
         z_h_flat = self.h_branch.to_euclidean(z_h)
+        z_h_flat = torch.nan_to_num(
+            z_h_flat.detach(), nan=0.0, posinf=1.0, neginf=-1.0
+        )
+
+        z_e = self.e_branch.encode(h)
         z_cat = torch.cat([z_h_flat, z_e], dim=-1)
         return self.fusion(z_cat)
 
@@ -52,10 +62,17 @@ class ProductManifoldExpert(ManifoldExpert):
     def to_euclidean(self, z: Tensor) -> Tensor:
         return z
 
-    def prototype_loss(self, h: Tensor, target_prototype_ids: Tensor, margin: float = 2.0) -> Tensor:
-        z_h = self.h_branch.encode(h)
+    def prototype_loss(
+        self,
+        h: Tensor,
+        target_prototype_ids: Tensor,
+        margin: float = 2.0,
+    ) -> Tensor:
+        with torch.no_grad():
+            z_h = self.h_branch.encode(h)
+            z_h = torch.nan_to_num(z_h, nan=0.0, posinf=1.0, neginf=-1.0)
         return self.h_branch.prototype_memory.prototype_loss(
-            z_h,
+            z_h.detach(),
             target_prototype_ids,
             self.curvature,
             margin=margin,
