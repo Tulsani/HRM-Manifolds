@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 
 EPS = 1e-5
-NORM_EPS = 1e-7   # raised from 1e-15 — prevents overflow in logmap0 scale
+NORM_EPS = 1e-7
 
 
 def _sqrt_c(c: float | Tensor, device: torch.device, dtype: torch.dtype) -> Tensor:
@@ -31,9 +31,12 @@ def project_to_ball(x: Tensor, c: float, eps: float = EPS) -> Tensor:
 def expmap0(v: Tensor, c: float) -> Tensor:
     sqrt_c = _sqrt_c(c, v.device, v.dtype)
     v_norm = _safe_norm(v, keepdim=True)
-    # tanh(sqrt_c * v_norm / 2) / (sqrt_c * v_norm)
-    # when v_norm -> 0, limit is 0.5, so we can safely compute
-    factor = torch.tanh(sqrt_c * v_norm / 2.0) / (sqrt_c * v_norm)
+    # tanh(t)/t is stable everywhere — no 0/0 issue in forward or backward
+    # because tanh(t)/t -> 1 as t -> 0 and PyTorch handles this smoothly
+    t = sqrt_c * v_norm / 2.0
+    # Use stable formula: tanh(t) / (sqrt_c * v_norm)
+    # At v_norm -> 0: tanh(t) ≈ t, so tanh(t)/(sqrt_c*v_norm) ≈ 0.5
+    factor = torch.tanh(t) / (sqrt_c * v_norm)
     x = factor * v
     return project_to_ball(x, c)
 
@@ -41,13 +44,33 @@ def expmap0(v: Tensor, c: float) -> Tensor:
 def logmap0(x: Tensor, c: float) -> Tensor:
     x = project_to_ball(x, c)
     sqrt_c = _sqrt_c(c, x.device, x.dtype)
-    x_norm = _safe_norm(x, keepdim=True)  # clamped to NORM_EPS
-    # artanh(sqrt_c * x_norm) / x_norm
-    # when x_norm -> 0, limit is sqrt_c, so scale -> 2.0
-    # we guard by clamping x_norm to NORM_EPS before dividing
-    atanh_val = artanh(sqrt_c * x_norm)
-    scale = (2.0 / sqrt_c) * atanh_val / x_norm
-    # final safety: clamp scale to prevent overflow
+    x_norm = _safe_norm(x, keepdim=True)
+
+    # The problem: artanh(t) / t has NaN gradient at t -> 0 via quotient rule.
+    # Fix: use torch.where to switch between Taylor expansion (small t)
+    # and exact formula (large t). Both branches have stable gradients.
+    #
+    # Taylor series: artanh(t) / t = 1 + t²/3 + t⁴/5 + ...
+    # For t < 1e-3, first two terms give error < 1e-9
+    # For t >= 1e-3, use exact formula artanh(t) / t directly
+
+    arg = (sqrt_c * x_norm).clamp(max=1.0 - EPS)  # t = sqrt_c * x_norm
+
+    # Exact branch: artanh(t) / t — safe when t is not near 0
+    # We evaluate at max(arg, 1e-3) to avoid division issues even in
+    # the branch that won't be selected, preventing NaN in unused branch
+    safe_arg = arg.clamp(min=1e-3)
+    exact = artanh(safe_arg) / safe_arg
+
+    # Taylor branch: 1 + t²/3 — safe near 0 with well-defined gradient
+    taylor = 1.0 + (arg ** 2) / 3.0
+
+    # Switch at threshold — torch.where has well-defined gradients
+    # for both branches so backward never hits 0/0
+    threshold = torch.full_like(arg, 1e-3)
+    atanh_over_t = torch.where(arg < threshold, taylor, exact)
+
+    scale = (2.0 / sqrt_c) * atanh_over_t
     scale = scale.clamp(max=100.0)
     return scale * x
 
@@ -77,6 +100,5 @@ def poincare_distance(x: Tensor, y: Tensor, c: float) -> Tensor:
     sqrt_c = _sqrt_c(c, x.device, x.dtype)
     delta = mobius_add(-x, y, c)
     delta_norm = _safe_norm(delta, keepdim=False)
-    # clamp argument to artanh to stay in (-1, 1)
     arg = (sqrt_c * delta_norm).clamp(max=1.0 - EPS)
     return (2.0 / sqrt_c) * artanh(arg)
