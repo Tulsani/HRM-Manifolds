@@ -40,7 +40,9 @@ def _load_json(path: str | Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def _build_system(config: dict[str, Any], device: torch.device) -> tuple[StudentSystem, dict[str, Any]]:
+def _build_system(
+    config: dict[str, Any], device: torch.device
+) -> tuple[StudentSystem, dict[str, Any]]:
     geometry_config = _load_json(config["experts"]["geometry_config"])
     system = StudentSystem.from_component_checkpoints(
         backbone_checkpoint=config["backbone"]["checkpoint"],
@@ -51,10 +53,28 @@ def _build_system(config: dict[str, Any], device: torch.device) -> tuple[Student
         expert_checkpoint_pattern=config["experts"]["checkpoint_pattern"],
         device=device,
     )
+
+    # Cast backbone to the dtype specified in config
+    # This must be done explicitly — from_component_checkpoints loads float32
+    backbone_dtype_str = config["backbone"].get("dtype", "float32")
+    dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "bf16":     torch.bfloat16,
+        "float16":  torch.float16,
+        "fp16":     torch.float16,
+        "float32":  torch.float32,
+    }
+    backbone_dtype = dtype_map.get(backbone_dtype_str, torch.float32)
+    system.backbone = system.backbone.to(dtype=backbone_dtype)
+
     for skill in system.skill_names:
         if skill not in system.heads:
             expert = system.experts[skill]
-            system.heads[skill] = OutputHead(manifold_dim=expert.manifold_dim, vocab_size=system.backbone.config.vocab_size).to(device)
+            system.heads[skill] = OutputHead(
+                manifold_dim=expert.manifold_dim,
+                vocab_size=system.backbone.config.vocab_size,
+            ).to(device)
+
     return system, geometry_config
 
 
@@ -152,6 +172,7 @@ def _training_step(
     sample_weights = batch["sample_weights"].to(device)
 
     hidden_states, _ = system.backbone(input_ids, attention_mask=attention_mask)
+    hidden_states = hidden_states.float()
     hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=1.0, neginf=-1.0)
     router_out = system.router(hidden_states)
     pooled = hidden_states.mean(dim=1)
