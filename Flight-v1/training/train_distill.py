@@ -198,6 +198,7 @@ def _training_step(
         student_logits = torch.nan_to_num(
             student_logits, nan=0.0, posinf=1.0, neginf=-1.0
         )
+        student_logits = student_logits.clamp(-30.0, 30.0)
         loss_output = loss_fn(
             student_logits=student_logits[mask],
             target_ids=target_ids[mask],

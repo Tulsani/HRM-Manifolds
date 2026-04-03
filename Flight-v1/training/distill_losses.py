@@ -70,6 +70,10 @@ class DistillLoss(nn.Module):
         student_final = student_logits[batch_indices, last_indices]
         vocab_student = student_final.size(-1)
         teacher_trimmed = teacher_logits[:, :vocab_student]
+        # Clamp logits before softmax to prevent overflow in bfloat16 backward
+        teacher_trimmed = teacher_trimmed.float().clamp(-30.0, 30.0)
+        student_final = student_final.float().clamp(-30.0, 30.0)
+
         teacher_dist = torch.softmax(
             teacher_trimmed / self.kd_temperature, dim=-1
         )
@@ -80,7 +84,8 @@ class DistillLoss(nn.Module):
             F.kl_div(student_log_dist, teacher_dist, reduction="none").sum(dim=-1)
             * (self.kd_temperature ** 2)
         )
-        return (per_sample * sample_weights).mean()
+        loss = (per_sample * sample_weights.float()).mean()
+        return torch.nan_to_num(loss, nan=0.0)
 
     def _trace_loss(
         self,
